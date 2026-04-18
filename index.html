@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Baseball VR Simulator</title>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: sans-serif; background: #000; }
+    #info {
+      position: fixed; top: 10px; left: 10px; color: white;
+      background: rgba(0,0,0,0.6); padding: 10px 14px; border-radius: 6px;
+      font-size: 13px; line-height: 1.5; max-width: 340px; z-index: 10;
+    }
+    #info code { background: rgba(255,255,255,0.15); padding: 1px 5px; border-radius: 3px; }
+    #info kbd { background: #444; color: #fff; padding: 1px 6px; border-radius: 3px;
+                border: 1px solid #888; font-family: monospace; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div id="info">
+    <b>⚾ Baseball VR</b><br/>
+    <b>In VR:</b> pull trigger to pitch, swing bat to hit<br/>
+    <b>Desktop debug:</b> press <kbd>P</kbd> to pitch<br/>
+    <small>Red sphere = spawn point · Green sphere = target zone<br/>
+    Install the <a href="https://chromewebstore.google.com/detail/immersive-web-emulator/cgffilbpcibhmcfbgggfhfolhkfbhmik"
+       target="_blank" style="color:#8cf;">Immersive Web Emulator</a> to test VR in Chrome.</small>
+  </div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+      "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+    }
+  }
+  </script>
+
+  <script type="module">
+  import * as THREE from 'three';
+  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { VRButton }   from 'three/addons/webxr/VRButton.js';
+  import * as CANNON    from 'cannon-es';
+
+  // ============================================================
+  // 🎯 CONFIG — TWEAK EVERYTHING HERE
+  // ============================================================
+  const CONFIG = {
+
+    // === 📁 ASSET PATHS ===
+    assets: {
+      stadium: './assets/stadium.glb',
+      bat:     './assets/bat2.glb',
+      ball:    './assets/baseball.glb',
+    },
+
+    // === 🏟️ STADIUM ===
+    // ⚠️ If you had to move your player to huge coordinates (e.g. -750, 20),
+    // your stadium is modeled at the wrong scale. Try stadium.scale = 0.01
+    // or 0.1 so 1 Three.js unit = 1 meter. Leaves physics & ball size correct.
+    stadium: {
+      position: { x: 0, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+      scale:    1.0,
+    },
+
+    // === 🧍 PLAYER (batter's box — where you stand) ===
+    player: {
+      position: { x: -750, y: 35, z: 0 },
+      // Rotation in RADIANS. If default view faces left, try y: Math.PI/2
+      // Common values:
+      //   facing -Z (default): y: 0
+      //   facing +X (right):   y: -Math.PI / 2
+      //   facing +Z (back):    y: Math.PI
+      //   facing -X (left):    y: Math.PI / 2
+      rotation: { x: 0, y: -Math.PI/2, z: 0 },
+    },
+
+    // === 🏏 BAT ===
+    bat: {
+      controllerIndex: 1, // 0 or 1 — swap if on wrong hand
+      scale: 1000.0,
+      offset: {
+        position: { x: 0, y: 0, z: -0.1 },
+        rotation: { x: 0, y: 0, z: 0 },
+      },
+      collider: {
+        radius: 0.04, length: 0.85,
+        rotation: { x: 0, y: 0, z: 0 },
+      },
+    },
+
+    // === ⚾ BASEBALL ===
+    ball: {
+      scale: 1.0,
+      radius: 0.037,
+      mass:   0.145,
+    },
+
+    // === 🎯 PITCH ===
+    // ⬇️ These are RELATIVE TO THE PLAYER — so if your player is at (-750, 20),
+    //    the pitcher will still be ~18m in front of you. Player rotation respected.
+    pitch: {
+      spawnOffset:  { x: 0, y: 1.6, z: -18 },   // relative to player
+      targetOffset: { x: 0, y: 1.1, z: -0.3 },  // relative to player
+      speed: 20,
+      randomSpread: 0.3,
+      cooldownMs: 500,
+    },
+
+    // === 🧲 PHYSICS ===
+    physics: {
+      gravity: -9.82,
+      hitBoost: 1.5,
+    },
+
+    // === 📊 HUD ===
+    hud: {
+      enabled: true,
+      position: { x: 0, y: 2.4, z: -2 },
+      size: { w: 1.0, h: 0.5 },
+    },
+
+    // === 🐞 DEBUG / PREVIEW ===
+    debug: {
+      previewBat: true,      // show a floating bat in non-VR mode
+      previewBatPos: { x: -750, y: 35, z: -0.6 },
+      showMarkers: true,     // red sphere at spawn, green sphere at target
+      keyboardPitch: true,   // press P to pitch without VR
+    },
+  };
+  // ============================================================
+  // END CONFIG
+  // ============================================================
+
+
+  // ---------- Scene / Renderer ----------
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+
+  const camera   = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.01, 2000);
+  camera.position.set(0, 1.6, 0); // default eye height for non-VR preview
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(devicePixelRatio);
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.xr.enabled = true;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  document.body.appendChild(renderer.domElement);
+  document.body.appendChild(VRButton.createButton(renderer));
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+  dirLight.position.set(5, 10, 5);
+  scene.add(dirLight);
+
+  // Player rig
+  const playerRig = new THREE.Group();
+  playerRig.position.set(CONFIG.player.position.x, CONFIG.player.position.y, CONFIG.player.position.z);
+  playerRig.rotation.set(CONFIG.player.rotation.x, CONFIG.player.rotation.y, CONFIG.player.rotation.z);
+  playerRig.add(camera);
+  scene.add(playerRig);
+
+
+  // ---------- Physics ----------
+  const world = new CANNON.World({ gravity: new CANNON.Vec3(0, CONFIG.physics.gravity, 0) });
+  world.broadphase = new CANNON.SAPBroadphase(world);
+  world.allowSleep = true;
+
+  const ballMat   = new CANNON.Material('ball');
+  const batMat    = new CANNON.Material('bat');
+  const groundMat = new CANNON.Material('ground');
+  world.addContactMaterial(new CANNON.ContactMaterial(ballMat, batMat,    { friction: 0.1, restitution: 0.9 }));
+  world.addContactMaterial(new CANNON.ContactMaterial(ballMat, groundMat, { friction: 0.4, restitution: 0.4 }));
+
+  const groundBody = new CANNON.Body({ mass: 0, material: groundMat, shape: new CANNON.Plane() });
+  groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1,0,0), -Math.PI/2);
+  groundBody.position.y = CONFIG.player.position.y; // ground at player's feet
+  world.addBody(groundBody);
+
+
+  // ---------- Asset Loading ----------
+  const loader = new GLTFLoader();
+  const loadGLB = url => new Promise((res, rej) => loader.load(url, g => res(g.scene), undefined, rej));
+
+  let stadiumModel, batTemplate, ballTemplate;
+
+  async function loadAll() {
+    console.log('Loading .glb assets…');
+    [stadiumModel, batTemplate, ballTemplate] = await Promise.all([
+      loadGLB(CONFIG.assets.stadium),
+      loadGLB(CONFIG.assets.bat),
+      loadGLB(CONFIG.assets.ball),
+    ]);
+
+    stadiumModel.position.set(CONFIG.stadium.position.x, CONFIG.stadium.position.y, CONFIG.stadium.position.z);
+    stadiumModel.rotation.set(CONFIG.stadium.rotation.x, CONFIG.stadium.rotation.y, CONFIG.stadium.rotation.z);
+    stadiumModel.scale.setScalar(CONFIG.stadium.scale);
+    scene.add(stadiumModel);
+    console.log('✓ Stadium loaded');
+
+    // Size sanity check
+    const box = new THREE.Box3().setFromObject(stadiumModel);
+    const size = box.getSize(new THREE.Vector3());
+    console.log(`Stadium bounding box: ${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)} units`);
+    if (size.x > 300) {
+      console.warn('⚠️ Stadium is huge (>300 units). Consider stadium.scale = 0.01 so 1 unit = 1 meter.');
+    }
+  }
+
+
+  // ---------- Controllers + Bat ----------
+  const grip0 = renderer.xr.getControllerGrip(0);
+  const grip1 = renderer.xr.getControllerGrip(1);
+  const ctrl0 = renderer.xr.getController(0);
+  const ctrl1 = renderer.xr.getController(1);
+  playerRig.add(grip0, grip1, ctrl0, ctrl1);
+
+  let batMesh = null;
+  let previewBatMesh = null;
+  let batBody = null;
+  const batPrevPos  = new THREE.Vector3();
+  const batVelocity = new THREE.Vector3();
+
+  function attachBat() {
+    // Real VR bat
+    batMesh = batTemplate.clone(true);
+    batMesh.scale.setScalar(CONFIG.bat.scale);
+    batMesh.position.set(CONFIG.bat.offset.position.x, CONFIG.bat.offset.position.y, CONFIG.bat.offset.position.z);
+    batMesh.rotation.set(CONFIG.bat.offset.rotation.x, CONFIG.bat.offset.rotation.y, CONFIG.bat.offset.rotation.z);
+    (CONFIG.bat.controllerIndex === 0 ? grip0 : grip1).add(batMesh);
+
+    // Physics body
+    const shape = new CANNON.Cylinder(
+      CONFIG.bat.collider.radius, CONFIG.bat.collider.radius,
+      CONFIG.bat.collider.length, 12
+    );
+    batBody = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, material: batMat });
+    const shapeQ = new CANNON.Quaternion();
+    shapeQ.setFromEuler(CONFIG.bat.collider.rotation.x, CONFIG.bat.collider.rotation.y, CONFIG.bat.collider.rotation.z);
+    batBody.addShape(shape, new CANNON.Vec3(0, 0, 0), shapeQ);
+    world.addBody(batBody);
+
+    // Desktop preview bat (visible outside VR)
+    if (CONFIG.debug.previewBat) {
+      previewBatMesh = batTemplate.clone(true);
+      previewBatMesh.scale.setScalar(CONFIG.bat.scale);
+      previewBatMesh.position.set(CONFIG.debug.previewBatPos.x, CONFIG.debug.previewBatPos.y, CONFIG.debug.previewBatPos.z);
+      previewBatMesh.rotation.set(CONFIG.bat.offset.rotation.x, CONFIG.bat.offset.rotation.y, CONFIG.bat.offset.rotation.z);
+      playerRig.add(previewBatMesh);
+      console.log('✓ Preview bat added (visible in desktop mode)');
+    }
+  }
+
+  renderer.xr.addEventListener('sessionstart', () => { if (previewBatMesh) previewBatMesh.visible = false; });
+  renderer.xr.addEventListener('sessionend',   () => { if (previewBatMesh) previewBatMesh.visible = true;  });
+
+
+  // ---------- Debug Markers ----------
+  function addMarkers() {
+    if (!CONFIG.debug.showMarkers) return;
+    const spawn = new THREE.Mesh(
+      new THREE.SphereGeometry(0.15, 16, 16),
+      new THREE.MeshBasicMaterial({ color: 0xff3333, transparent: true, opacity: 0.6 })
+    );
+    spawn.position.set(CONFIG.pitch.spawnOffset.x, CONFIG.pitch.spawnOffset.y, CONFIG.pitch.spawnOffset.z);
+    playerRig.add(spawn);
+
+    const target = new THREE.Mesh(
+      new THREE.SphereGeometry(0.12, 16, 16),
+      new THREE.MeshBasicMaterial({ color: 0x33ff33, transparent: true, opacity: 0.5 })
+    );
+    target.position.set(CONFIG.pitch.targetOffset.x, CONFIG.pitch.targetOffset.y, CONFIG.pitch.targetOffset.z);
+    playerRig.add(target);
+    console.log('✓ Debug markers added (red = spawn, green = target)');
+  }
+
+
+  // ---------- Pitch Spawner ----------
+  const activeBalls = [];
+  let lastPitchTime = 0;
+
+  function spawnPitch() {
+    if (!ballTemplate) { console.warn('Ball model not loaded yet'); return; }
+    const now = performance.now();
+    if (now - lastPitchTime < CONFIG.pitch.cooldownMs) return;
+    lastPitchTime = now;
+
+    // Convert RELATIVE offsets to WORLD positions (accounts for player rotation)
+    const spawnWorld  = playerRig.localToWorld(new THREE.Vector3(
+      CONFIG.pitch.spawnOffset.x, CONFIG.pitch.spawnOffset.y, CONFIG.pitch.spawnOffset.z
+    ));
+    const targetWorld = playerRig.localToWorld(new THREE.Vector3(
+      CONFIG.pitch.targetOffset.x + (Math.random() - 0.5) * CONFIG.pitch.randomSpread,
+      CONFIG.pitch.targetOffset.y,
+      CONFIG.pitch.targetOffset.z
+    ));
+
+    const mesh = ballTemplate.clone(true);
+    mesh.scale.setScalar(CONFIG.ball.scale);
+    mesh.position.copy(spawnWorld);
+    scene.add(mesh);
+
+    const body = new CANNON.Body({
+      mass: CONFIG.ball.mass, material: ballMat,
+      shape: new CANNON.Sphere(CONFIG.ball.radius),
+      linearDamping: 0.01, angularDamping: 0.01,
+    });
+    body.position.copy(mesh.position);
+
+    const dir = targetWorld.clone().sub(spawnWorld).normalize();
+    body.velocity.set(dir.x * CONFIG.pitch.speed, dir.y * CONFIG.pitch.speed, dir.z * CONFIG.pitch.speed);
+
+    body.addEventListener('collide', (e) => {
+      if (e.body === batBody) {
+        stats.hitCount++;
+        stats.lastHitSpeed = batVelocity.length();
+        const impulseDir = batVelocity.clone().normalize();
+        const strength = batVelocity.length() * CONFIG.physics.hitBoost * CONFIG.ball.mass;
+        body.applyImpulse(
+          new CANNON.Vec3(
+            impulseDir.x * strength,
+            Math.abs(impulseDir.y * strength) + strength * 0.3,
+            impulseDir.z * strength
+          ),
+          new CANNON.Vec3(0, 0, 0)
+        );
+      }
+    });
+
+    world.addBody(body);
+    activeBalls.push({ mesh, body, spawnTime: now });
+    stats.pitchCount++;
+    console.log(`⚾ Pitch #${stats.pitchCount} from`, spawnWorld.toArray().map(n => n.toFixed(1)));
+  }
+
+  ctrl0.addEventListener('selectstart', spawnPitch);
+  ctrl1.addEventListener('selectstart', spawnPitch);
+
+  if (CONFIG.debug.keyboardPitch) {
+    window.addEventListener('keydown', (e) => {
+      if (e.key.toLowerCase() === 'p') spawnPitch();
+    });
+  }
+
+
+  // ---------- HUD ----------
+  const stats = { pitchCount: 0, hitCount: 0, lastHitSpeed: 0 };
+  let hud = null;
+
+  function makeHUD() {
+    if (!CONFIG.hud.enabled) return;
+    const canvas = document.createElement('canvas');
+    canvas.width = 512; canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+    const texture = new THREE.CanvasTexture(canvas);
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(CONFIG.hud.size.w, CONFIG.hud.size.h),
+      new THREE.MeshBasicMaterial({ map: texture, transparent: true })
+    );
+    mesh.position.set(CONFIG.hud.position.x, CONFIG.hud.position.y, CONFIG.hud.position.z);
+    playerRig.add(mesh);
+    hud = { mesh, canvas, ctx, texture };
+  }
+
+  function updateHUD() {
+    if (!hud) return;
+    const { canvas, ctx, texture } = hud;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold 40px sans-serif';
+    ctx.fillText('⚾ Baseball VR', 20, 50);
+    ctx.font = '28px sans-serif';
+    ctx.fillText(`Pitches: ${stats.pitchCount}`, 20, 110);
+    ctx.fillText(`Hits:    ${stats.hitCount}`,   20, 150);
+    ctx.fillText(`Last Bat Speed: ${stats.lastHitSpeed.toFixed(1)} m/s`, 20, 200);
+    texture.needsUpdate = true;
+  }
+
+
+  // ---------- Main Loop ----------
+  const clock = new THREE.Clock();
+  const tmpV  = new THREE.Vector3();
+  const tmpQ  = new THREE.Quaternion();
+
+  function syncBatBody(dt) {
+    if (!batMesh || !batBody) return;
+    batMesh.getWorldPosition(tmpV);
+    batMesh.getWorldQuaternion(tmpQ);
+    batVelocity.copy(tmpV).sub(batPrevPos).divideScalar(Math.max(dt, 1e-4));
+    batPrevPos.copy(tmpV);
+    batBody.position.copy(tmpV);
+    batBody.quaternion.copy(tmpQ);
+    batBody.velocity.set(batVelocity.x, batVelocity.y, batVelocity.z);
+  }
+
+  function syncBalls() {
+    for (const b of activeBalls) {
+      b.mesh.position.copy(b.body.position);
+      b.mesh.quaternion.copy(b.body.quaternion);
+    }
+    const now = performance.now();
+    for (let i = activeBalls.length - 1; i >= 0; i--) {
+      const b = activeBalls[i];
+      if (b.body.position.y < CONFIG.player.position.y - 2 || now - b.spawnTime > 15000) {
+        scene.remove(b.mesh);
+        world.removeBody(b.body);
+        activeBalls.splice(i, 1);
+      }
+    }
+  }
+
+  renderer.setAnimationLoop(() => {
+    const dt = clock.getDelta();
+    syncBatBody(dt);
+    world.step(1/60, dt, 3);
+    syncBalls();
+    updateHUD();
+    renderer.render(scene, camera);
+  });
+
+  addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+
+  // ---------- Boot ----------
+  loadAll().then(() => {
+    attachBat();
+    makeHUD();
+    addMarkers();
+    console.log('✅ Ready. Press P (desktop) or pull trigger (VR) to pitch.');
+  }).catch(err => {
+    console.error(err);
+    document.body.insertAdjacentHTML('beforeend',
+      `<div style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+         background:#b00;color:white;padding:20px;font-family:sans-serif;border-radius:8px;
+         max-width:400px;text-align:center;">
+         <b>Failed to load assets.</b><br/><br/>
+         Make sure <code>stadium.glb</code>, <code>bat.glb</code>, and <code>baseball.glb</code>
+         are inside an <code>assets/</code> folder next to <code>index.html</code>.<br/><br/>
+         <small>${err.message}</small>
+       </div>`);
+  });
+  </script>
+</body>
+</html>
