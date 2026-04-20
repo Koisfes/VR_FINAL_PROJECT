@@ -22,8 +22,7 @@
     🏏 Move controller to the <span style="color:#0f0">green pedestal</span>,
     press <b>GRIP (squeeze)</b> to grab<br/>
     🎯 Pull <b>trigger</b> to pitch a ball<br/>
-    ⌨️ Desktop: <kbd>G</kbd> grab/drop · <kbd>P</kbd> pitch · <kbd>D</kbd> toggle debug<br/>
-    🖱️ Drag to look · Scroll to zoom
+    ⌨️ Desktop: <kbd>G</kbd> grab/drop · <kbd>P</kbd> pitch · <kbd>D</kbd> toggle debug
   </div>
 
   <!-- Debug toggle button -->
@@ -65,59 +64,67 @@
     // === 📁 ASSET PATHS ===
     assets: {
       stadium: './assets/stadium.glb',
-      bat:     './assets/bat.glb',
+      bat:     './assets/bat2.glb',
       ball:    './assets/baseball.glb',
     },
 
     // === 🏟️ STADIUM ===
-    // ⚠️ If you had to move your player to huge coordinates (e.g. -750, 20),
-    // your stadium is modeled at the wrong scale. Try stadium.scale = 0.01
-    // or 0.1 so 1 Three.js unit = 1 meter. Leaves physics & ball size correct.
     stadium: {
-      position: { x: 0, y: 0, z: 0 },
-      rotation: { x: 0, y: 0, z: 0 },
-      scale:    1.0,
+      position: { x: 0, y: 0, z: -60 },
+      rotation: { x: 0, y: Math.PI/2, z: 0 },
+      scale:    0.08,
     },
 
     // === 🧍 PLAYER ===
     player: {
-      position: { x: 0, y: 0, z: 0 },  // START AT ORIGIN to find everything
+      position: { x: 0, y: 0, z: 0 },
       rotation: { x: 0, y: 0, z: 0 },
     },
 
     // === 🏏 BAT ===
     bat: {
-      // If true, use a built-in red cylinder as the bat (guaranteed visible).
-      // Set to false once you've confirmed everything works, to use your .glb.
-      useFallbackBat: true,
-      scale: 1.0,
-      // Where the bat spawns in the world, relative to the player.
+      useFallbackBat: false,
       pickupSpawnOffset: { x: 0.5, y: 1.0, z: -0.7 },
-      pickupRange: 1.0, // meters — generous so pickup is easy
-      // Offset once the bat is held (relative to the grip).
-      offset: {
-        position: { x: 0, y: 0, z: -0.45 }, // push bat forward ~half its length
-        rotation: { x: -Math.PI / 2, y: 0, z: 0 }, // rotate so it points forward
+      pickupRange: 1.0,
+      forceRedWhenHeld: false,
+
+      // ─── THE MODEL (visible .glb bat) ───────────────────────────────
+      // Your bat2.glb: handle is at its origin (z=0), barrel extends to z=0.8.
+      // When held, the bat mesh origin goes at your hand, so rotate so the
+      // barrel points FORWARD (-Z in world = towards pitcher).
+      // The bat naturally points along +Z, so rotate 180° around Y.
+      model: {
+        scale: 1.0,
+        position: { x: 0, y: 0, z: 0 },
+        rotation: { x: Math.PI/2, y: 6 * Math.PI/6, z: 0 },
       },
-      forceRedWhenHeld: true,
+
+      // ─── THE HITBOX (physics cylinder) ──────────────────────────────
+      // Your bat2.glb is oriented along the Z axis (handle at z=0, tip at z=0.8).
+      // The hitbox cylinder defaults to length-along-Y, so we rotate it
+      // 90° around X to make its length run along Z, matching the bat.
       hitbox: {
-        radius: 0.15,   // per-sphere radius in the chain
-        length: 0.85,   // bat length — spheres span this
+        radius: 0.08,    // cylinder thickness (barrel radius)
+        length: 0.80,    // matches the bat model length (0.8m)
+        // Position: shift +0.4 on Z to center on the bat (bat is 0 to 0.8)
+        position: { x: -0.5, y: 0, z: 0 },
+        // Rotation: lay the cylinder along Z
+        rotation: { x: 0, y: 0, z: Math.PI/2 },
       },
     },
 
     // === ⚾ BASEBALL ===
     ball: {
-      scale:  0.4,      // softball-sized while debugging, still visible
-      radius: 0.12,     // generous hitbox
+      scale:  0.4,
+      radius: 0.24,
       mass:   0.145,
     },
 
     // === 🎯 PITCH ===
     pitch: {
-      spawnOffset:  { x: 0, y: 2.0, z: -12 },     // mound 2m high (pitcher's arm)
-      targetOffset: { x: 0, y: 1.3, z: -0.5 },    // chest-height strike zone
-      speed: 12,                                   // comfortable swinging speed
+      spawnOffset:  { x: 0, y: 2.0, z: -12 },
+      targetOffset: { x: 0.7, y: 1.5, z: -0.5 },
+      speed: 12,
       randomSpread: 0.15,
       cooldownMs: 500,
     },
@@ -143,13 +150,9 @@
       keyboardPitch: true,
       showBatLocationCube: true,
       batCubeSize: 1.0,
-      // 🟦 Show a translucent blue cylinder where the bat's physics collider is.
-      // If this isn't overlapping with your red bat, that's your problem.
       showBatCollider: true,
     },
   };
-  // ============================================================
-  // END CONFIG
   // ============================================================
 
 
@@ -158,7 +161,7 @@
   scene.background = new THREE.Color(0x87ceeb);
 
   const camera   = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.01, 5000);
-  camera.position.set(3, 3, 5); // pulled back so you can see origin on load
+  camera.position.set(3, 3, 5);
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(devicePixelRatio);
@@ -173,7 +176,7 @@
   dirLight.position.set(5, 10, 5);
   scene.add(dirLight);
 
-  // ---------- Debug Registry (declared early so everything can push to it) ----------
+  // ---------- Debug Registry ----------
   const debugObjects = [];
   let debugVisible = true;
   const coordsEl = document.getElementById('coords');
@@ -191,21 +194,18 @@
     console.log(`🐞 Debug mode: ${on ? 'ON' : 'OFF'}`);
   }
 
-  // 🧭 Axis helper at origin — red=X, green=Y, blue=Z
   const axisHelperObj = new THREE.AxesHelper(10);
   axisHelperObj.material.depthTest = false;
   axisHelperObj.renderOrder = 999;
   scene.add(axisHelperObj);
   debugObjects.push(axisHelperObj);
 
-  // 🖱️ Desktop mouse-look controls (disabled once you enter VR)
   const orbit = new OrbitControls(camera, renderer.domElement);
   orbit.target.set(0, 1.5, -1);
   orbit.update();
   renderer.xr.addEventListener('sessionstart', () => { orbit.enabled = false; });
   renderer.xr.addEventListener('sessionend',   () => { orbit.enabled = true;  });
 
-  // Player rig
   const playerRig = new THREE.Group();
   playerRig.position.set(CONFIG.player.position.x, CONFIG.player.position.y, CONFIG.player.position.z);
   playerRig.rotation.set(CONFIG.player.rotation.x, CONFIG.player.rotation.y, CONFIG.player.rotation.z);
@@ -226,7 +226,7 @@
 
   const groundBody = new CANNON.Body({ mass: 0, material: groundMat, shape: new CANNON.Plane() });
   groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1,0,0), -Math.PI/2);
-  groundBody.position.y = CONFIG.player.position.y; // ground at player's feet
+  groundBody.position.y = CONFIG.player.position.y;
   world.addBody(groundBody);
 
 
@@ -250,7 +250,6 @@
     scene.add(stadiumModel);
     console.log('✓ Stadium loaded');
 
-    // Size sanity checks
     const sBox = new THREE.Box3().setFromObject(stadiumModel);
     const sSize = sBox.getSize(new THREE.Vector3());
     console.log(`📏 Stadium size: ${sSize.x.toFixed(2)} × ${sSize.y.toFixed(2)} × ${sSize.z.toFixed(2)} units`);
@@ -262,13 +261,6 @@
     const ballBox = new THREE.Box3().setFromObject(ballTemplate);
     const ballSize = ballBox.getSize(new THREE.Vector3());
     console.log(`📏 Ball raw size: ${ballSize.x.toFixed(3)} × ${ballSize.y.toFixed(3)} × ${ballSize.z.toFixed(3)} units`);
-
-    // If stadium is huge AND bat is tiny, bat will be invisible
-    if (sSize.x > 300 && bSize.x < 2) {
-      console.warn('⚠️ SCALE MISMATCH: Stadium is in cm-scale but bat is in m-scale.');
-      console.warn('   Fix 1 (recommended): stadium.scale = 0.01, player back to (0,0,0)');
-      console.warn('   Fix 2: bat.scale = 100, ball.scale = 100, ball.radius = 3.7');
-    }
   }
 
 
@@ -279,7 +271,6 @@
   const ctrl1 = renderer.xr.getController(1);
   playerRig.add(grip0, grip1, ctrl0, ctrl1);
 
-  // 🟣 Visible controller markers
   function makeControllerMarker(color) {
     const g = new THREE.Group();
     const sphere = new THREE.Mesh(
@@ -305,23 +296,19 @@
   ctrl0.addEventListener('connected', (e) => console.log('🎮 Controller 0 connected:', e.data.handedness));
   ctrl1.addEventListener('connected', (e) => console.log('🎮 Controller 1 connected:', e.data.handedness));
 
-  // === BAT STATE ===
-  let batMesh = null;       // the bat (lives in world OR on controller)
-  let batBody = null;       // physics body for the bat
-  let batHolder = null;     // which grip is holding it (null = on ground)
+  let batMesh = null;
+  let batBody = null;
+  let batHolder = null;
   const batPrevPos  = new THREE.Vector3();
   const batVelocity = new THREE.Vector3();
 
   function spawnBatInWorld() {
-    // Build the bat mesh — either from .glb or a fallback red cylinder
     if (CONFIG.bat.useFallbackBat) {
-      // Guaranteed-visible fallback bat: a simple red cylinder, 0.85m long
       const batGroup = new THREE.Group();
       const barrel = new THREE.Mesh(
         new THREE.CylinderGeometry(0.04, 0.03, 0.85, 16),
         new THREE.MeshStandardMaterial({ color: 0xff2222, emissive: 0x550000 })
       );
-      // Add a darker grip area at one end so you can tell orientation
       const grip = new THREE.Mesh(
         new THREE.CylinderGeometry(0.028, 0.028, 0.2, 16),
         new THREE.MeshStandardMaterial({ color: 0x222222 })
@@ -329,24 +316,76 @@
       grip.position.y = -0.325;
       batGroup.add(barrel, grip);
       batMesh = batGroup;
-      console.log('🏏 Using FALLBACK cylinder bat (guaranteed visible)');
+      console.log('🏏 Using FALLBACK cylinder bat');
     } else {
-      batMesh = batTemplate.clone(true);
-      batMesh.scale.setScalar(CONFIG.bat.scale);
+      // ⚠️ The .glb (from Sketchfab) has nested node matrices that tilt and
+      // offset the geometry. BAKE those transforms into the vertices so we
+      // start from a clean state, then center on bounding-box center so our
+      // own rotations pivot around the middle of the bat.
+      const cloned = batTemplate.clone(true);
+      cloned.updateMatrixWorld(true);
+
+      const cleanGroup = new THREE.Group();
+      cloned.traverse(child => {
+        if (child.isMesh) {
+          const geom = child.geometry.clone();
+          geom.applyMatrix4(child.matrixWorld); // bake world transform into verts
+          cleanGroup.add(new THREE.Mesh(geom, child.material));
+        }
+      });
+
+      // Center geometry on its bounding box so rotations pivot on the middle
+      const bbox = new THREE.Box3().setFromObject(cleanGroup);
+      const ctr  = bbox.getCenter(new THREE.Vector3());
+      const size = bbox.getSize(new THREE.Vector3());
+      cleanGroup.traverse(child => {
+        if (child.isMesh) child.geometry.translate(-ctr.x, -ctr.y, -ctr.z);
+      });
+      console.log(`🏏 Bat baked & centered. True size: ${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)}`);
+
+      cleanGroup.scale.setScalar(CONFIG.bat.model.scale);
+
+      batMesh = new THREE.Group();
+      batMesh.name = 'batWrapper';
+      batMesh.add(cleanGroup);
     }
 
-    // Spawn position RELATIVE to player (so it's always reachable)
     const spawnPos = playerRig.localToWorld(new THREE.Vector3(
       CONFIG.bat.pickupSpawnOffset.x,
       CONFIG.bat.pickupSpawnOffset.y,
       CONFIG.bat.pickupSpawnOffset.z
     ));
     batMesh.position.copy(spawnPos);
-    batMesh.rotation.set(0, 0, 0);
+    // Apply the configured model rotation even before pickup, so the rotation
+    // is visible on the pedestal and you can tell if changes are working.
+    batMesh.rotation.set(
+      CONFIG.bat.model.rotation.x,
+      CONFIG.bat.model.rotation.y,
+      CONFIG.bat.model.rotation.z
+    );
+    console.log(`🏏 Spawning bat with model.rotation = (${CONFIG.bat.model.rotation.x.toFixed(2)}, ${CONFIG.bat.model.rotation.y.toFixed(2)}, ${CONFIG.bat.model.rotation.z.toFixed(2)})`);
+    console.log(`🏏 Spawning bat with model.position = (${CONFIG.bat.model.position.x.toFixed(2)}, ${CONFIG.bat.model.position.y.toFixed(2)}, ${CONFIG.bat.model.position.z.toFixed(2)})`);
     scene.add(batMesh);
 
-    // 🟦 Blue wireframe CYLINDER showing where the hitbox is.
-    // Sphere chain along this cylinder — 10 overlapping spheres.
+    // ─── HITBOX: separate Group with its OWN transform ───
+    // Child of batMesh so it follows, but has its own position/rotation
+    // that you configure SEPARATELY from the model's pose.
+    const hitboxGroup = new THREE.Group();
+    hitboxGroup.name = 'batHitboxViz';
+    hitboxGroup.position.set(
+      CONFIG.bat.hitbox.position.x,
+      CONFIG.bat.hitbox.position.y,
+      CONFIG.bat.hitbox.position.z
+    );
+    hitboxGroup.rotation.set(
+      CONFIG.bat.hitbox.rotation.x,
+      CONFIG.bat.hitbox.rotation.y,
+      CONFIG.bat.hitbox.rotation.z
+    );
+    batMesh.add(hitboxGroup);
+    debugObjects.push(hitboxGroup);
+
+    // Blue wireframe cylinder (visual of the hitbox shape)
     const hitboxViz = new THREE.Mesh(
       new THREE.CylinderGeometry(
         CONFIG.bat.hitbox.radius,
@@ -362,12 +401,9 @@
         depthWrite: false,
       })
     );
-    hitboxViz.name = 'batHitboxViz';
-    batMesh.add(hitboxViz);
-    debugObjects.push(hitboxViz);
+    hitboxGroup.add(hitboxViz);
     console.log(`🟦 Blue hitbox CYLINDER (r=${CONFIG.bat.hitbox.radius}m, L=${CONFIG.bat.hitbox.length}m)`);
 
-    // Glowing green pedestal so you can SEE where the bat spawns
     const pedestal = new THREE.Mesh(
       new THREE.CylinderGeometry(0.3, 0.3, 0.05, 16),
       new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.6 })
@@ -377,9 +413,7 @@
     scene.add(pedestal);
     debugObjects.push(pedestal);
 
-    // Physics body: a CHAIN OF SPHERES along the bat's length.
-    // Cannon-ES cylinder-vs-sphere has tunneling issues, so sphere-vs-sphere.
-    // Spheres laid out along LOCAL Y axis to match the visual cylinder.
+    // Physics body: sphere chain along the hitbox's local Y (cylinder length axis)
     batBody = new CANNON.Body({
       mass: 0,
       type: CANNON.Body.KINEMATIC,
@@ -388,59 +422,74 @@
     const sphereCount = 10;
     const halfLen = CONFIG.bat.hitbox.length / 2;
     for (let i = 0; i < sphereCount; i++) {
-      const t = i / (sphereCount - 1);                   // 0..1
-      const y = -halfLen + t * CONFIG.bat.hitbox.length; // along Y
+      const t = i / (sphereCount - 1);
+      const y = -halfLen + t * CONFIG.bat.hitbox.length;
       batBody.addShape(
         new CANNON.Sphere(CONFIG.bat.hitbox.radius),
         new CANNON.Vec3(0, y, 0)
       );
 
-      // 🟣 Magenta wireframe sphere showing each physics sphere location
+      // Magenta wireframe dot showing each physics sphere
       const dot = new THREE.Mesh(
         new THREE.SphereGeometry(CONFIG.bat.hitbox.radius * 1.1, 10, 10),
         new THREE.MeshBasicMaterial({ color: 0xff00ff, wireframe: true })
       );
       dot.position.set(0, y, 0);
-      hitboxViz.add(dot);
-      debugObjects.push(dot);
+      hitboxGroup.add(dot);   // child of hitbox group so it follows hitbox rotation
     }
     batBody.position.copy(batMesh.position);
     world.addBody(batBody);
-    console.log(`🏏 Bat hitbox: ${sphereCount}-sphere chain along the bat`);
-
+    console.log(`🏏 Bat hitbox: ${sphereCount}-sphere chain`);
     console.log(`🏏 Bat spawned at world (${spawnPos.x.toFixed(1)}, ${spawnPos.y.toFixed(1)}, ${spawnPos.z.toFixed(1)})`);
-    console.log(`   👉 Put your controller near it and press GRIP (squeeze) to pick up!`);
   }
 
-  // ---------- Pickup/Drop with grip button (squeezestart) ----------
   function tryPickup(grip) {
     if (!batMesh) return;
-    if (batHolder) return; // already held
+    if (batHolder) return;
 
-    // Distance check — controller must be within pickup range of the bat
     const gripPos = new THREE.Vector3();
     const batPos  = new THREE.Vector3();
     grip.getWorldPosition(gripPos);
     batMesh.getWorldPosition(batPos);
     const dist = gripPos.distanceTo(batPos);
 
-    console.log(`🤏 Pickup attempt. Distance to bat: ${dist.toFixed(2)}m (threshold: ${CONFIG.bat.pickupRange}m)`);
+    console.log(`🤏 Pickup attempt. Distance: ${dist.toFixed(2)}m`);
 
     if (dist <= CONFIG.bat.pickupRange) {
-      // Attach the bat to the grip
       scene.remove(batMesh);
       grip.add(batMesh);
-      batMesh.position.set(CONFIG.bat.offset.position.x, CONFIG.bat.offset.position.y, CONFIG.bat.offset.position.z);
-      batMesh.rotation.set(CONFIG.bat.offset.rotation.x, CONFIG.bat.offset.rotation.y, CONFIG.bat.offset.rotation.z);
+      // Apply MODEL pose (not hitbox pose — hitbox has its own transform as a child)
+      batMesh.position.set(
+        CONFIG.bat.model.position.x,
+        CONFIG.bat.model.position.y,
+        CONFIG.bat.model.position.z
+      );
+      batMesh.rotation.set(
+        CONFIG.bat.model.rotation.x,
+        CONFIG.bat.model.rotation.y,
+        CONFIG.bat.model.rotation.z
+      );
+      batMesh.updateMatrixWorld(true);
 
-      // Make it BRIGHT RED so it's impossible to miss while held.
-      // But SKIP the debug visualizations — otherwise the blue cylinder and
-      // magenta physics markers also get painted red and we lose them.
+      // 🔍 DEBUG: log where the bat's geometry ACTUALLY ends up in world space.
+      // If the rotation config isn't reflected here, there's a nested transform
+      // inside the .glb overriding us.
+      const box = new THREE.Box3().setFromObject(batMesh);
+      const size = box.getSize(new THREE.Vector3());
+      const ctr  = box.getCenter(new THREE.Vector3());
+      const grp  = new THREE.Vector3(); grip.getWorldPosition(grp);
+      console.log(`✅ Bat picked up!`);
+      console.log(`   Applied rotation:  (${CONFIG.bat.model.rotation.x.toFixed(2)}, ${CONFIG.bat.model.rotation.y.toFixed(2)}, ${CONFIG.bat.model.rotation.z.toFixed(2)})`);
+      console.log(`   Bat world bbox:    size=(${size.x.toFixed(2)}, ${size.y.toFixed(2)}, ${size.z.toFixed(2)})`);
+      console.log(`   Bat center world:  (${ctr.x.toFixed(2)}, ${ctr.y.toFixed(2)}, ${ctr.z.toFixed(2)})`);
+      console.log(`   Grip world:        (${grp.x.toFixed(2)}, ${grp.y.toFixed(2)}, ${grp.z.toFixed(2)})`);
+      console.log(`   → If size.z is biggest, bat points along world Z (forward/back)`);
+      console.log(`   → If size.x is biggest, bat points along world X (left/right)`);
+      console.log(`   → If size.y is biggest, bat points along world Y (up/down)`);
+
       if (CONFIG.bat.forceRedWhenHeld) {
         batMesh.traverse(obj => {
           if (!obj.isMesh) return;
-          if (obj === batMesh.getObjectByName('batHitboxViz')) return;
-          // Skip children of the hitbox viz too (the magenta dots)
           let p = obj.parent;
           while (p && p !== batMesh) {
             if (p.name === 'batHitboxViz') return;
@@ -451,15 +500,6 @@
       }
 
       batHolder = grip;
-
-      // Log actual bounding box of held bat so we can verify its size
-      const box = new THREE.Box3().setFromObject(batMesh);
-      const size = box.getSize(new THREE.Vector3());
-      const wp = new THREE.Vector3();
-      batMesh.getWorldPosition(wp);
-      console.log(`✅ Bat picked up!`);
-      console.log(`   Held bat size: ${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)} meters`);
-      console.log(`   Held bat world pos: (${wp.x.toFixed(2)}, ${wp.y.toFixed(2)}, ${wp.z.toFixed(2)})`);
     } else {
       console.log(`❌ Too far. Move your hand closer to the bat.`);
     }
@@ -467,7 +507,6 @@
 
   function dropBat() {
     if (!batMesh || !batHolder) return;
-    // Detach bat and leave it at its current world position
     const worldPos = new THREE.Vector3();
     const worldQ   = new THREE.Quaternion();
     batMesh.getWorldPosition(worldPos);
@@ -480,18 +519,13 @@
     console.log('🫳 Bat dropped');
   }
 
-  // Both controllers can pick up with grip (squeeze) or trigger fallback
   ctrl0.addEventListener('squeezestart', () => tryPickup(grip0));
   ctrl1.addEventListener('squeezestart', () => tryPickup(grip1));
-  // Pressing squeeze again while holding drops the bat
-  ctrl0.addEventListener('squeezeend', () => { /* keep holding for now */ });
-  ctrl1.addEventListener('squeezeend', () => { /* keep holding for now */ });
 
-  // Also support keyboard pickup for desktop testing
+  // Keyboard: G = pickup/drop
   window.addEventListener('keydown', (e) => {
     const k = e.key.toLowerCase();
     if (k === 'g') {
-      // Pick up with whichever controller is closer
       if (batHolder) { dropBat(); return; }
       const g0p = new THREE.Vector3(); grip0.getWorldPosition(g0p);
       const g1p = new THREE.Vector3(); grip1.getWorldPosition(g1p);
@@ -504,7 +538,6 @@
   });
 
 
-  // ---------- Debug Markers ----------
   // ---------- Debug Markers ----------
   function addMarkers() {
     const spawn = new THREE.Mesh(
@@ -522,7 +555,7 @@
     target.position.set(CONFIG.pitch.targetOffset.x, CONFIG.pitch.targetOffset.y, CONFIG.pitch.targetOffset.z);
     playerRig.add(target);
     debugObjects.push(target);
-    console.log('✓ Debug markers added (red = spawn, green = target)');
+    console.log('✓ Debug markers added');
   }
 
 
@@ -531,12 +564,11 @@
   let lastPitchTime = 0;
 
   function spawnPitch() {
-    if (!ballTemplate) { console.warn('Ball model not loaded yet'); return; }
+    if (!ballTemplate) return;
     const now = performance.now();
     if (now - lastPitchTime < CONFIG.pitch.cooldownMs) return;
     lastPitchTime = now;
 
-    // Convert RELATIVE offsets to WORLD positions (accounts for player rotation)
     const spawnWorld  = playerRig.localToWorld(new THREE.Vector3(
       CONFIG.pitch.spawnOffset.x, CONFIG.pitch.spawnOffset.y, CONFIG.pitch.spawnOffset.z
     ));
@@ -551,15 +583,9 @@
     mesh.position.copy(spawnWorld);
     scene.add(mesh);
 
-    // 🔴 Red wireframe sphere showing the ball's physics hitbox
     const ballHitboxViz = new THREE.Mesh(
       new THREE.SphereGeometry(CONFIG.ball.radius, 12, 12),
-      new THREE.MeshBasicMaterial({
-        color: 0xff2222,
-        wireframe: true,
-        transparent: true,
-        opacity: 0.8,
-      })
+      new THREE.MeshBasicMaterial({ color: 0xff2222, wireframe: true, transparent: true, opacity: 0.8 })
     );
     mesh.add(ballHitboxViz);
     debugObjects.push(ballHitboxViz);
@@ -570,8 +596,6 @@
       linearDamping: 0.01, angularDamping: 0.01,
     });
     body.position.copy(mesh.position);
-
-    // 🎯 Continuous Collision Detection
     body.ccdSpeedThreshold = 1;
     body.ccdIterations = 5;
 
@@ -579,15 +603,8 @@
     const dx = dir.x, dz = dir.z;
     const horizontalDist = Math.sqrt(dx*dx + dz*dz);
     const flightTime = horizontalDist / CONFIG.pitch.speed;
-
-    // 📐 Ballistic aiming: compute the vertical velocity needed so the ball
-    // arrives at target height AFTER gravity acts on it for the flight time.
-    //     y_target = y_spawn + vy * t + 0.5 * g * t²
-    // →   vy = (y_target - y_spawn - 0.5 * g * t²) / t
-    const g  = CONFIG.physics.gravity;  // negative number
+    const g  = CONFIG.physics.gravity;
     const vy = (targetWorld.y - spawnWorld.y - 0.5 * g * flightTime * flightTime) / flightTime;
-
-    // Horizontal velocity — normalized XZ direction scaled by pitch speed
     const horizNorm = horizontalDist > 1e-6 ? 1 / horizontalDist : 0;
     body.velocity.set(
       dx * horizNorm * CONFIG.pitch.speed,
@@ -596,13 +613,8 @@
     );
 
     body.addEventListener('collide', (e) => {
-      // Log EVERY collision so we can see exactly what the ball hits
-      const what =
-        e.body === batBody    ? 'BAT' :
-        e.body === groundBody ? 'GROUND' :
-                                `other(id=${e.body.id})`;
+      const what = e.body === batBody ? 'BAT' : (e.body === groundBody ? 'GROUND' : 'other');
       console.log(`💥 Ball collided with ${what} | batVel=${batVelocity.length().toFixed(2)}m/s`);
-
       if (e.body === batBody) {
         stats.hitCount++;
         stats.lastHitSpeed = batVelocity.length();
@@ -622,7 +634,6 @@
     world.addBody(body);
     activeBalls.push({ mesh, body, spawnTime: now });
     stats.pitchCount++;
-    console.log(`⚾ Pitch #${stats.pitchCount} from`, spawnWorld.toArray().map(n => n.toFixed(1)));
   }
 
   ctrl0.addEventListener('selectstart', spawnPitch);
@@ -634,7 +645,6 @@
     });
   }
 
-  // 🐞 Debug toggle — button click OR D key
   document.getElementById('debugBtn').addEventListener('click', () => setDebugVisible(!debugVisible));
   window.addEventListener('keydown', (e) => {
     if (e.key.toLowerCase() === 'd') setDebugVisible(!debugVisible);
@@ -682,9 +692,6 @@
   const tmpV  = new THREE.Vector3();
   const tmpQ  = new THREE.Quaternion();
 
-  // 🟡 YELLOW sphere showing where the batBody physics body actually is in world space.
-  // This is attached to the SCENE (not the bat), so if it doesn't overlap
-  // the blue cylinder, the physics body isn't syncing to the mesh.
   const batBodyProbe = new THREE.Mesh(
     new THREE.SphereGeometry(0.05, 12, 12),
     new THREE.MeshBasicMaterial({ color: 0xffff00, wireframe: true })
@@ -702,8 +709,6 @@
     batBody.position.copy(tmpV);
     batBody.quaternion.copy(tmpQ);
     batBody.velocity.set(batVelocity.x, batVelocity.y, batVelocity.z);
-
-    // Show the body's actual position with a yellow marker
     batBodyProbe.position.copy(batBody.position);
   }
 
@@ -712,8 +717,6 @@
       b.mesh.position.copy(b.body.position);
       b.mesh.quaternion.copy(b.body.quaternion);
 
-      // 🔍 PROXIMITY LOG: if the ball gets within 0.5m of the bat body,
-      // log it so we know the physics bodies are near each other.
       if (batBody && !b.proxLogged) {
         const dx = b.body.position.x - batBody.position.x;
         const dy = b.body.position.y - batBody.position.y;
@@ -736,36 +739,12 @@
     }
   }
 
-  // Per-second debug log of where everything actually is
-  let logTimer = 0;
-  function debugLog(dt) {
-    logTimer += dt;
-    if (logTimer < 1.0) return;
-    logTimer = 0;
-    if (!batMesh) return;
-    const bp = new THREE.Vector3();
-    const g0 = new THREE.Vector3();
-    const g1 = new THREE.Vector3();
-    const cp = new THREE.Vector3();
-    batMesh.getWorldPosition(bp);
-    grip0.getWorldPosition(g0);
-    grip1.getWorldPosition(g1);
-    camera.getWorldPosition(cp);
-    console.log(
-      `📍 cam:(${cp.x.toFixed(1)},${cp.y.toFixed(1)},${cp.z.toFixed(1)}) | ` +
-      `grip0:(${g0.x.toFixed(1)},${g0.y.toFixed(1)},${g0.z.toFixed(1)}) | ` +
-      `grip1:(${g1.x.toFixed(1)},${g1.y.toFixed(1)},${g1.z.toFixed(1)}) | ` +
-      `bat:(${bp.x.toFixed(1)},${bp.y.toFixed(1)},${bp.z.toFixed(1)})`
-    );
-  }
-
   renderer.setAnimationLoop(() => {
     const dt = clock.getDelta();
     syncBatBody(dt);
-    world.step(1/120, dt, 10); // finer timestep, more substeps = no tunneling
+    world.step(1/120, dt, 10);
     syncBalls();
     updateHUD();
-    debugLog(dt);
     if (coordsEl) {
       const p = camera.position;
       coordsEl.textContent = `cam: (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})`;
@@ -785,11 +764,11 @@
     spawnBatInWorld();
     makeHUD();
     addMarkers();
-    // Apply initial debug state (from CONFIG.debug.showBatCollider / showMarkers)
     const startOn = CONFIG.debug.showBatCollider || CONFIG.debug.showMarkers;
     setDebugVisible(startOn);
-    console.log('✅ Ready. GRAB THE BAT: move controller near green pedestal, press GRIP (squeeze).');
-    console.log('   Desktop: G = grab/drop · P = pitch · D = toggle debug.');
+    console.log('✅ Ready.');
+    console.log('   G = grab/drop · P = pitch · D = debug toggle');
+    console.log('   🎛️  While holding bat: QWE=X rot, AS=Y rot, ZX=Z rot, arrows=XZ pos, R/F=Y pos');
   }).catch(err => {
     console.error(err);
     document.body.insertAdjacentHTML('beforeend',
@@ -797,7 +776,7 @@
          background:#b00;color:white;padding:20px;font-family:sans-serif;border-radius:8px;
          max-width:400px;text-align:center;">
          <b>Failed to load assets.</b><br/><br/>
-         Make sure <code>stadium.glb</code>, <code>bat.glb</code>, and <code>baseball.glb</code>
+         Make sure <code>stadium.glb</code>, <code>bat2.glb</code>, and <code>baseball.glb</code>
          are inside an <code>assets/</code> folder next to <code>index.html</code>.<br/><br/>
          <small>${err.message}</small>
        </div>`);
