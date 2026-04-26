@@ -1,0 +1,920 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Baseball VR Simulator</title>
+  <style>
+    body { margin: 0; overflow: hidden; font-family: sans-serif; background: #000; }
+
+    #info {
+      position: fixed; top: 10px; left: 10px; color: white;
+      background: rgba(0,0,0,0.6); padding: 10px 14px; border-radius: 6px;
+      font-size: 13px; line-height: 1.5; max-width: 340px; z-index: 10;
+    }
+    #info code { background: rgba(255,255,255,0.15); padding: 1px 5px; border-radius: 3px; }
+    #info kbd {
+      background: #444; color: #fff; padding: 1px 6px; border-radius: 3px;
+      border: 1px solid #888; font-family: monospace; font-size: 12px;
+    }
+
+    #debugBtn {
+      position: fixed; bottom: 70px; right: 10px; z-index: 10;
+      background: #222; color: #0f0; border: 2px solid #0f0;
+      padding: 10px 18px; border-radius: 6px; cursor: pointer;
+      font-family: sans-serif; font-size: 14px; font-weight: bold;
+    }
+
+    #coords {
+      position: fixed; top: 10px; right: 10px; color: #0f0;
+      background: rgba(0,0,0,0.6); padding: 8px 12px; border-radius: 4px;
+      font: 12px monospace; z-index: 10;
+    }
+  </style>
+</head>
+<body>
+
+  <div id="info">
+    <b>⚾ Baseball VR</b><br/>
+    🏏 Move controller to the <span style="color:#0f0">green pedestal</span>,
+    press <b>GRIP (squeeze)</b> to grab<br/>
+    🎯 Pull <b>trigger</b> to pitch a ball<br/>
+    ⌨️ Desktop: <kbd>G</kbd> grab/drop · <kbd>P</kbd> pitch · <kbd>D</kbd> debug · <kbd>R</kbd> reset stats
+  </div>
+
+  <button id="debugBtn">🐞 Debug: ON</button>
+  <div id="coords">cam: ...</div>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three":         "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+      "cannon-es":     "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js"
+    }
+  }
+  </script>
+
+  <script type="module">
+  import * as THREE        from 'three';
+  import { GLTFLoader }    from 'three/addons/loaders/GLTFLoader.js';
+  import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
+  import { VRButton }      from 'three/addons/webxr/VRButton.js';
+  import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import * as CANNON       from 'cannon-es';
+
+  // SkeletonUtils loaded separately — it lives at a known path under three/addons
+  // Using a dynamic import so a failure here doesn't black-screen the whole app
+
+  // ============================================================
+  // 🎯 CONFIG
+  // ============================================================
+  function cloneScene(obj) {
+    return obj.clone(true);
+  }
+
+  
+  const CONFIG = {
+
+    assets: {
+      stadium: './assets/stadium.glb',
+      bat:     './assets/baseballBat.glb',
+      ball:    './assets/baseball.glb',
+      pitcher: './assets/pitcher.glb',
+    },
+
+    stadium: {
+      position: { x: 0, y: 0, z: -60 },
+      rotation: { x: 0, y: Math.PI / 2, z: 0 },
+      scale: 0.08,
+    },
+
+    player: {
+      position: { x: -1.2, y: 0, z: 0 },
+      rotation: { x: 0, y: 0, z: 0 },
+    },
+
+    bat: {
+      useFallbackBat: false,
+      pickupSpawnOffset: { x: 0.5, y: 1.0, z: -0.7 },
+      pickupRange: 1.0,
+      forceRedWhenHeld: false,
+
+      model: {
+        scale: 0.4,
+        position: { x: 0.3, y: 0, z: 0 },
+        rotation: { x: Math.PI / 2, y: Math.PI / 2, z: 0 },
+      },
+
+      hitbox: {
+        radius: 0.075,
+        length: 0.75,
+        position: { x: 0, y: 0, z: 0.4 },
+        rotation: { x: Math.PI / 2, y: 0, z: 0 },
+      },
+    },
+
+    pitcher: {
+      scale: 1.0,
+      rotation: { x: 0, y: Math.PI * 1.5, z: 0 },
+    },
+
+    ball: {
+      scale:  0.3,
+      radius: 0.3,
+      mass:   0.145,
+    },
+
+    pitch: {
+      spawnOffset:  { x: 0.7, y: 2.2, z: -20  },
+      targetOffset: { x: 0.7, y: 1.4, z: 0 },
+      speed:        20,
+      randomSpread: 0.15,
+      cooldownMs:   500,
+    },
+
+    physics: {
+      gravity:  -9.82,
+      hitBoost: 2,
+    },
+
+    hud: {
+      enabled:  true,
+      position: { x: 2.3, y: 1.6, z: -1.2 },
+      rotation: { y: -Math.PI * 0.28 },
+      size:     { w: 1.1, h: 0.7 },
+    },
+
+    debug: {
+      showMarkers:     true,
+      keyboardPitch:   true,
+      showBatCollider: true,
+    },
+  };
+  // ============================================================
+
+
+  // ── Scene / Renderer ─────────────────────────────────────────
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x87ceeb);
+
+  const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 5000);
+  camera.position.set(3, 3, 5);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(devicePixelRatio);
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.xr.enabled = true;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  // Enable physically correct lighting so GLB PBR materials render properly
+ 
+  document.body.appendChild(renderer.domElement);
+  document.body.appendChild(VRButton.createButton(renderer));
+
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x444444, 1.0));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+  dirLight.position.set(5, 10, 5);
+  scene.add(dirLight);
+
+
+  // ── Debug Registry ───────────────────────────────────────────
+  const debugObjects = [];
+  let debugVisible = true;
+  const coordsEl = document.getElementById('coords');
+
+  function setDebugVisible(on) {
+    debugVisible = on;
+    for (const obj of debugObjects) obj.visible = on;
+    if (coordsEl) coordsEl.style.display = on ? 'block' : 'none';
+    const btn = document.getElementById('debugBtn');
+    if (btn) {
+      btn.textContent       = on ? '🐞 Debug: ON' : '🐞 Debug: OFF';
+      btn.style.color       = on ? '#0f0' : '#f88';
+      btn.style.borderColor = on ? '#0f0' : '#f88';
+    }
+  }
+
+  const axisHelper = new THREE.AxesHelper(10);
+  axisHelper.material.depthTest = false;
+  axisHelper.renderOrder = 999;
+  scene.add(axisHelper);
+  debugObjects.push(axisHelper);
+
+  document.getElementById('debugBtn').addEventListener('click', () => setDebugVisible(!debugVisible));
+  window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'd') setDebugVisible(!debugVisible); });
+
+
+  // ── Orbit Controls ───────────────────────────────────────────
+  const orbit = new OrbitControls(camera, renderer.domElement);
+  orbit.target.set(0, 1.5, -1);
+  orbit.maxPolarAngle = Math.PI * 0.72;
+  orbit.minPolarAngle = Math.PI * 0.18;
+  orbit.update();
+
+  renderer.xr.addEventListener('sessionstart', () => { orbit.enabled = false; });
+  renderer.xr.addEventListener('sessionend',   () => { orbit.enabled = true;  });
+
+
+  // ── Player Rig ───────────────────────────────────────────────
+  const playerRig = new THREE.Group();
+  playerRig.position.set(CONFIG.player.position.x, CONFIG.player.position.y, CONFIG.player.position.z);
+  playerRig.rotation.set(CONFIG.player.rotation.x, CONFIG.player.rotation.y, CONFIG.player.rotation.z);
+  playerRig.add(camera);
+  scene.add(playerRig);
+
+
+  // ── Physics World ────────────────────────────────────────────
+  const world = new CANNON.World({ gravity: new CANNON.Vec3(0, CONFIG.physics.gravity, 0) });
+  world.broadphase = new CANNON.SAPBroadphase(world);
+  world.allowSleep = true;
+
+  const ballPhysMat   = new CANNON.Material('ball');
+  const batPhysMat    = new CANNON.Material('bat');
+  const groundPhysMat = new CANNON.Material('ground');
+
+  world.addContactMaterial(new CANNON.ContactMaterial(ballPhysMat, batPhysMat, {
+    friction: 0.1,
+    restitution: 0.9,
+  }));
+  world.addContactMaterial(new CANNON.ContactMaterial(ballPhysMat, groundPhysMat, {
+    friction: 0.4,
+    restitution: 0.4,
+  }));
+
+  const groundBody = new CANNON.Body({ mass: 0, material: groundPhysMat, shape: new CANNON.Plane() });
+  groundBody.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), -Math.PI / 2);
+  groundBody.position.y = CONFIG.player.position.y;
+  world.addBody(groundBody);
+
+
+  // ── Asset Loading ────────────────────────────────────────────
+  const loader = new GLTFLoader();
+  // Returns just the scene root — same as original code expected
+  const loadGLB = url => new Promise((res, rej) =>
+  loader.load(url, gltf => res(gltf.scene), undefined, rej)
+);
+
+  // Template scenes stored after load — cloned each time a new instance is needed
+  let stadiumTemplate, batTemplate, ballTemplate, pitcherTemplate;
+
+  // Fix texture color spaces on a scene's materials so PBR renders correctly
+  function fixMaterialColorSpaces(root) {
+    root.traverse(child => {
+      if (!child.isMesh) return;
+      const mats = Array.isArray(child.material) ? child.material : [child.material];
+      for (const mat of mats) {
+        if (!mat) continue;
+        for (const key of ['map', 'emissiveMap', 'sheenColorMap']) {
+          if (mat[key]) mat[key].colorSpace = THREE.SRGBColorSpace;
+        }
+        for (const key of ['normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'displacementMap']) {
+          if (mat[key]) mat[key].colorSpace = THREE.LinearSRGBColorSpace;
+        }
+        mat.needsUpdate = true;
+      }
+    });
+  }
+  async function loadAll() {
+    console.log('Loading assets…');
+    [stadiumTemplate, batTemplate, ballTemplate, pitcherTemplate] = await Promise.all([
+
+      loadGLB(CONFIG.assets.stadium),
+      loadGLB(CONFIG.assets.bat),
+      loadGLB(CONFIG.assets.ball),
+      loadGLB(CONFIG.assets.pitcher),
+    ]);
+
+
+    // Fix color spaces on templates — clones inherit corrected textures
+    [batTemplate, ballTemplate, pitcherTemplate].forEach(fixMaterialColorSpaces);
+
+    // Stadium is single-use — position it directly
+    stadiumTemplate.position.set(CONFIG.stadium.position.x, CONFIG.stadium.position.y, CONFIG.stadium.position.z);
+    stadiumTemplate.rotation.set(CONFIG.stadium.rotation.x, CONFIG.stadium.rotation.y, CONFIG.stadium.rotation.z);
+    stadiumTemplate.scale.setScalar(CONFIG.stadium.scale);
+    scene.add(stadiumTemplate);
+
+    console.log('✓ Assets loaded');
+  }
+
+  // Clone a template scene, preserving full material/texture hierarchy.
+  // SkeletonUtils.clone handles skinned meshes and bone references correctly.
+  // Falls back to plain .clone(true) if SkeletonUtils didn't load.
+  function cloneTemplate(template) {
+    return cloneScene(template);
+  }
+
+  // Get the bounding-box center of an object (for centering without flattening geometry)
+  function getCenterOffset(group) {
+    const bbox = new THREE.Box3().setFromObject(group);
+    return bbox.getCenter(new THREE.Vector3());
+  }
+
+
+  // ── Controllers ──────────────────────────────────────────────
+  const ctrl0 = renderer.xr.getController(0);
+  const ctrl1 = renderer.xr.getController(1);
+  playerRig.add(ctrl0, ctrl1);
+
+  const controllerModelFactory = new XRControllerModelFactory();
+
+  const grip0 = renderer.xr.getControllerGrip(0);
+  grip0.add(controllerModelFactory.createControllerModel(grip0));
+  grip0.position.set(-0.3, 0, 0);
+  playerRig.add(grip0);
+
+  const grip1 = renderer.xr.getControllerGrip(1);
+  grip1.add(controllerModelFactory.createControllerModel(grip1));
+  grip1.position.set(0.3, 0, 0);
+  playerRig.add(grip1);
+  // Laser lines — same as dragging_example.html
+  const laserGeom = new THREE.BufferGeometry().setFromPoints([
+    new THREE.Vector3(0, 0, 0),
+    new THREE.Vector3(0, 0, -1),
+  ]);
+  const laserLine = new THREE.Line(laserGeom);
+  laserLine.name = 'line';
+  laserLine.scale.z = 5;
+  ctrl0.add(laserLine.clone());
+  ctrl1.add(laserLine.clone());
+
+  ctrl0.addEventListener('connected', e => console.log('🎮 Controller 0:', e.data.handedness));
+  ctrl1.addEventListener('connected', e => console.log('🎮 Controller 1:', e.data.handedness));
+
+
+  let batMesh   = null;
+  let batBody   = null;
+  let batHolder = null;
+
+  const BAT_VEL_SAMPLES = 6;
+  const batPosSamples   = [];
+  const batVelocity     = new THREE.Vector3();
+  const batPrevPos      = new THREE.Vector3();
+
+  function spawnBatInWorld() {
+    if (CONFIG.bat.useFallbackBat) {
+      const batGroup = new THREE.Group();
+      batGroup.add(new THREE.Mesh(
+        new THREE.CylinderGeometry(0.04, 0.03, 0.85, 16),
+        new THREE.MeshStandardMaterial({ color: 0xff2222, emissive: 0x550000 })
+      ));
+      const handle = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.028, 0.028, 0.2, 16),
+        new THREE.MeshStandardMaterial({ color: 0x222222 })
+      );
+      handle.position.y = -0.325;
+      batGroup.add(handle);
+      batMesh = batGroup;
+    } else {
+      const cloned = batTemplate.clone(true);
+      cloned.updateMatrixWorld(true);
+      const cleanGroup = new THREE.Group();
+      cloned.traverse(child => {
+        if (child.isMesh) {
+          const geom = child.geometry.clone();
+          geom.applyMatrix4(child.matrixWorld);
+          cleanGroup.add(new THREE.Mesh(geom, child.material));
+        }
+      });
+      const bbox = new THREE.Box3().setFromObject(cleanGroup);
+      const ctr  = bbox.getCenter(new THREE.Vector3());
+      const size = bbox.getSize(new THREE.Vector3());
+      cleanGroup.traverse(child => {
+        if (child.isMesh) child.geometry.translate(-ctr.x, -ctr.y, -ctr.z);
+      });
+      console.log(`🏏 Bat size: ${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)}`);
+      cleanGroup.scale.setScalar(CONFIG.bat.model.scale);
+      batMesh = new THREE.Group();
+      batMesh.name = 'batWrapper';
+      batMesh.add(cleanGroup);
+    }
+
+    const spawnPos = playerRig.localToWorld(new THREE.Vector3(
+      CONFIG.bat.pickupSpawnOffset.x,
+      CONFIG.bat.pickupSpawnOffset.y,
+      CONFIG.bat.pickupSpawnOffset.z
+    ));
+    batMesh.position.copy(spawnPos);
+    batMesh.rotation.set(CONFIG.bat.model.rotation.x, CONFIG.bat.model.rotation.y, CONFIG.bat.model.rotation.z);
+    scene.add(batMesh);
+
+    const pedestal = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.3, 0.3, 0.05, 16),
+      new THREE.MeshBasicMaterial({ color: 0x00ff00, transparent: true, opacity: 0.6 })
+    );
+    pedestal.position.copy(spawnPos);
+    pedestal.position.y -= 0.425;
+    scene.add(pedestal);
+    debugObjects.push(pedestal);
+
+    // Hitbox group
+    const hitboxGroup = new THREE.Group();
+    hitboxGroup.name = 'batHitboxViz';
+    hitboxGroup.position.set(CONFIG.bat.hitbox.position.x, CONFIG.bat.hitbox.position.y, CONFIG.bat.hitbox.position.z);
+    hitboxGroup.rotation.set(CONFIG.bat.hitbox.rotation.x, CONFIG.bat.hitbox.rotation.y, CONFIG.bat.hitbox.rotation.z);
+    batMesh.add(hitboxGroup);
+    debugObjects.push(hitboxGroup);
+
+    // Blue wireframe viz
+    hitboxGroup.add(new THREE.Mesh(
+      new THREE.CylinderGeometry(CONFIG.bat.hitbox.radius, CONFIG.bat.hitbox.radius, CONFIG.bat.hitbox.length, 16),
+      new THREE.MeshBasicMaterial({ color: 0x00aaff, transparent: true, opacity: 0.25, wireframe: true, depthWrite: false })
+    ));
+
+    // Physics cylinder
+    batBody = new CANNON.Body({ mass: 0, type: CANNON.Body.KINEMATIC, material: batPhysMat });
+    const batCylShape = new CANNON.Cylinder(
+      CONFIG.bat.hitbox.radius,
+      CONFIG.bat.hitbox.radius,
+      CONFIG.bat.hitbox.length,
+      12
+    );
+    const cylQ = new CANNON.Quaternion();
+    cylQ.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), Math.PI / 2);
+    batBody.addShape(batCylShape, new CANNON.Vec3(0, 0, 0), cylQ);
+
+    // Magenta wireframe viz
+    hitboxGroup.add(new THREE.Mesh(
+      new THREE.CylinderGeometry(CONFIG.bat.hitbox.radius * 1.05, CONFIG.bat.hitbox.radius * 1.05, CONFIG.bat.hitbox.length, 12),
+      new THREE.MeshBasicMaterial({ color: 0xff00ff, wireframe: true })
+    ));
+
+    batBody.position.copy(batMesh.position);
+    world.addBody(batBody);
+    console.log(`🏏 Bat spawned at (${spawnPos.x.toFixed(1)}, ${spawnPos.y.toFixed(1)}, ${spawnPos.z.toFixed(1)})`);
+  }
+
+  function tryPickup(grip) {
+    if (!batMesh || batHolder) return;
+    const gripPos = new THREE.Vector3();
+    const batPos  = new THREE.Vector3();
+    grip.getWorldPosition(gripPos);
+    batMesh.getWorldPosition(batPos);
+    if (gripPos.distanceTo(batPos) > CONFIG.bat.pickupRange) {
+      console.log('❌ Too far — move closer.');
+      return;
+    }
+    scene.remove(batMesh);
+    grip.add(batMesh);
+    batMesh.position.set(CONFIG.bat.model.position.x, CONFIG.bat.model.position.y, CONFIG.bat.model.position.z);
+    batMesh.rotation.set(CONFIG.bat.model.rotation.x, CONFIG.bat.model.rotation.y, CONFIG.bat.model.rotation.z);
+    batMesh.updateMatrixWorld(true);
+    batHolder = grip;
+    batPosSamples.length = 0;
+    batVelocity.set(0, 0, 0);
+    console.log('✅ Bat picked up');
+  }
+
+  function dropBat() {
+    if (!batMesh || !batHolder) return;
+    const worldPos = new THREE.Vector3();
+    const worldQ   = new THREE.Quaternion();
+    batMesh.getWorldPosition(worldPos);
+    batMesh.getWorldQuaternion(worldQ);
+    batHolder.remove(batMesh);
+    scene.add(batMesh);
+    batMesh.position.copy(worldPos);
+    batMesh.quaternion.copy(worldQ);
+    batHolder = null;
+    console.log('🫳 Bat dropped');
+  }
+
+  ctrl0.addEventListener('squeezestart', () => tryPickup(grip0));
+  ctrl1.addEventListener('squeezestart', () => tryPickup(grip1));
+
+  window.addEventListener('keydown', e => {
+    if (e.key.toLowerCase() !== 'g') return;
+    if (batHolder) { dropBat(); return; }
+    if (!batMesh) return;
+    const bp  = new THREE.Vector3(); batMesh.getWorldPosition(bp);
+    const g0p = new THREE.Vector3(); grip0.getWorldPosition(g0p);
+    const g1p = new THREE.Vector3(); grip1.getWorldPosition(g1p);
+    tryPickup(g0p.distanceTo(bp) < g1p.distanceTo(bp) ? grip0 : grip1);
+  });
+
+
+  // ── Pitcher ──────────────────────────────────────────────────
+  function spawnPitcher() {
+    if (!pitcherTemplate) { console.warn('pitcher.glb not loaded'); return; }
+
+    // ✅ Use cloneTemplate — preserves full material/texture hierarchy
+    const pitcherRoot = pitcherTemplate.clone(true);
+
+    // Wrap in a container so scale/rotation don't distort the model's own transforms
+    const pitcherWrapper = new THREE.Group();
+
+    // Center the model within the wrapper
+    pitcherWrapper.add(pitcherRoot);
+
+    const bbox   = new THREE.Box3().setFromObject(pitcherRoot);
+    const center = bbox.getCenter(new THREE.Vector3());
+    const size   = bbox.getSize(new THREE.Vector3());
+
+    pitcherRoot.position.sub(center);
+    pitcherRoot.position.y += size.y / 2;
+    pitcherWrapper.scale.setScalar(CONFIG.pitcher.scale);
+    pitcherWrapper.rotation.set(CONFIG.pitcher.rotation.x, CONFIG.pitcher.rotation.y, CONFIG.pitcher.rotation.z);
+
+    const spawnWorld = playerRig.localToWorld(new THREE.Vector3(
+      CONFIG.pitch.spawnOffset.x, 0, CONFIG.pitch.spawnOffset.z
+    ));
+    pitcherWrapper.position.copy(spawnWorld);
+    scene.add(pitcherWrapper);
+
+    // Static physics hitbox
+    const pitcherPhysMat = new CANNON.Material('pitcher');
+    world.addContactMaterial(new CANNON.ContactMaterial(ballPhysMat, pitcherPhysMat, {
+      friction: 0.1, restitution: 0.5,
+    }));
+    const pitcherBody = new CANNON.Body({ mass: 0, type: CANNON.Body.STATIC, material: pitcherPhysMat });
+    pitcherBody.addShape(new CANNON.Cylinder(0.3, 0.3, 1.6, 10));
+    pitcherBody.position.set(spawnWorld.x, 0.8, spawnWorld.z);
+    world.addBody(pitcherBody);
+
+    const pitcherViz = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.3, 0.3, 1.6, 10),
+      new THREE.MeshBasicMaterial({ color: 0xffaa00, wireframe: true })
+    );
+    pitcherViz.position.set(spawnWorld.x, 0.8, spawnWorld.z);
+    scene.add(pitcherViz);
+    debugObjects.push(pitcherViz);
+    console.log(`⚾ Pitcher spawned at (${spawnWorld.x.toFixed(1)}, 0, ${spawnWorld.z.toFixed(1)})`);
+  }
+
+
+  // ── Debug Markers ────────────────────────────────────────────
+  function addMarkers() {
+    if (!CONFIG.debug.showMarkers) return;
+
+    const spawnMarker = new THREE.Mesh(
+      new THREE.SphereGeometry(0.15, 16, 16),
+      new THREE.MeshBasicMaterial({ color: 0xff3333, transparent: true, opacity: 0.6 })
+    );
+    spawnMarker.position.set(CONFIG.pitch.spawnOffset.x, CONFIG.pitch.spawnOffset.y, CONFIG.pitch.spawnOffset.z);
+    playerRig.add(spawnMarker);
+    debugObjects.push(spawnMarker);
+
+    const targetMarker = new THREE.Mesh(
+      new THREE.SphereGeometry(0.12, 16, 16),
+      new THREE.MeshBasicMaterial({ color: 0x33ff33, transparent: true, opacity: 0.5 })
+    );
+    targetMarker.position.set(CONFIG.pitch.targetOffset.x, CONFIG.pitch.targetOffset.y, CONFIG.pitch.targetOffset.z);
+    playerRig.add(targetMarker);
+    debugObjects.push(targetMarker);
+  }
+
+
+  // ── Pitch Spawner ────────────────────────────────────────────
+  const activeBalls   = [];
+  const resolvedBalls = new Set();
+  let lastPitchTime   = 0;
+
+  function spawnPitch() {
+    if (!ballTemplate) return;
+    const now = performance.now();
+    if (now - lastPitchTime < CONFIG.pitch.cooldownMs) return;
+    lastPitchTime = now;
+
+    const spawnWorld = playerRig.localToWorld(new THREE.Vector3(
+      CONFIG.pitch.spawnOffset.x, CONFIG.pitch.spawnOffset.y, CONFIG.pitch.spawnOffset.z
+    ));
+    const targetWorld = playerRig.localToWorld(new THREE.Vector3(
+      CONFIG.pitch.targetOffset.x + (Math.random() - 0.5) * CONFIG.pitch.randomSpread,
+      CONFIG.pitch.targetOffset.y,
+      CONFIG.pitch.targetOffset.z
+    ));
+
+    // ✅ cloneTemplate for balls too — keeps texture references intact
+    const mesh = ballTemplate.clone(true);
+    mesh.scale.setScalar(CONFIG.ball.scale);
+    mesh.position.copy(spawnWorld);
+    scene.add(mesh);
+
+    const ballViz = new THREE.Mesh(
+      new THREE.SphereGeometry(CONFIG.ball.radius, 12, 12),
+      new THREE.MeshBasicMaterial({ color: 0xff2222, wireframe: true, transparent: true, opacity: 0.8 })
+    );
+    mesh.add(ballViz);
+    debugObjects.push(ballViz);
+
+    const body = new CANNON.Body({
+      mass: CONFIG.ball.mass,
+      material: ballPhysMat,
+      shape: new CANNON.Sphere(CONFIG.ball.radius),
+      linearDamping:  0.01,
+      angularDamping: 0.01,
+    });
+    body.position.set(spawnWorld.x, spawnWorld.y, spawnWorld.z);
+    body.ccdSpeedThreshold = 1;
+    body.ccdIterations = 5;
+
+    const dx = targetWorld.x - spawnWorld.x;
+    const dy = targetWorld.y - spawnWorld.y;
+    const dz = targetWorld.z - spawnWorld.z;
+    const horizDist  = Math.sqrt(dx * dx + dz * dz);
+    const flightTime = horizDist / CONFIG.pitch.speed;
+    const g  = CONFIG.physics.gravity;
+    const vy = (dy - 0.5 * g * flightTime * flightTime) / flightTime;
+    const hNorm = horizDist > 1e-6 ? 1 / horizDist : 0;
+    body.velocity.set(
+      dx * hNorm * CONFIG.pitch.speed,
+      vy,
+      dz * hNorm * CONFIG.pitch.speed
+    );
+
+    let lastBatHitTime = 0;
+    body.addEventListener('collide', e => {
+      if (e.body !== batBody) return;
+      const t = performance.now();
+      if (t - lastBatHitTime < 300) return;
+      lastBatHitTime = t;
+
+      stats.hitCount++;
+      stats.lastHitSpeed = batVelocity.length();
+      resolvedBalls.add(body);
+      console.log(`💥 HIT! bat speed=${batVelocity.length().toFixed(2)}m/s`);
+
+      const impulseDir = batVelocity.clone().normalize();
+      const strength   = Math.max(batVelocity.length(), 1.0) * CONFIG.physics.hitBoost * CONFIG.ball.mass;
+      body.applyImpulse(
+        new CANNON.Vec3(
+          impulseDir.x * strength,
+          Math.abs(impulseDir.y * strength) + strength * 0.3,
+          impulseDir.z * strength
+        ),
+        new CANNON.Vec3(0, 0, 0)
+      );
+    });
+
+    world.addBody(body);
+    activeBalls.push({ mesh, body, spawnTime: now });
+    stats.pitchCount++;
+  }
+
+  ctrl0.addEventListener('selectstart', spawnPitch);
+  ctrl1.addEventListener('selectstart', spawnPitch);
+
+  if (CONFIG.debug.keyboardPitch) {
+    window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'p') spawnPitch(); });
+  }
+
+
+  // ── HUD / Scoreboard ─────────────────────────────────────────
+  const stats = { pitchCount: 0, hitCount: 0, lastHitSpeed: 0 };
+  let hud = null;
+
+  function roundRect(ctx, x, y, w, h, r) {
+    const radius = typeof r === 'number' ? { tl: r, tr: r, bl: r, br: r } : r;
+    ctx.beginPath();
+    ctx.moveTo(x + radius.tl, y);
+    ctx.lineTo(x + w - radius.tr, y);
+    ctx.quadraticCurveTo(x + w, y,     x + w, y + radius.tr);
+    ctx.lineTo(x + w, y + h - radius.br);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - radius.br, y + h);
+    ctx.lineTo(x + radius.bl, y + h);
+    ctx.quadraticCurveTo(x,    y + h,  x, y + h - radius.bl);
+    ctx.lineTo(x, y + radius.tl);
+    ctx.quadraticCurveTo(x, y,         x + radius.tl, y);
+    ctx.closePath();
+  }
+
+  function drawResetButton(state) {
+    if (!hud?.btnCtx) return;
+    const { btnCtx, btnCanvas, btnTex } = hud;
+    btnCtx.clearRect(0, 0, btnCanvas.width, btnCanvas.height);
+    btnCtx.fillStyle = state === 'pressed' ? '#006600' : '#cc2200';
+    roundRect(btnCtx, 8, 8, 240, 64, 14);
+    btnCtx.fill();
+    btnCtx.fillStyle = 'white';
+    btnCtx.font      = 'bold 28px sans-serif';
+    btnCtx.textAlign = 'center';
+    btnCtx.fillText(state === 'pressed' ? '✓  RESET!' : '↺  RESET STATS', 128, 52);
+    btnTex.needsUpdate = true;
+  }
+
+  function makeHUD() {
+    if (!CONFIG.hud.enabled) return;
+    const canvas  = document.createElement('canvas');
+    canvas.width  = 512;
+    canvas.height = 320;
+    const ctx     = canvas.getContext('2d');
+    const texture = new THREE.CanvasTexture(canvas);
+    const mesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(CONFIG.hud.size.w, CONFIG.hud.size.h),
+      new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide })
+    );
+    mesh.position.set(CONFIG.hud.position.x, CONFIG.hud.position.y, CONFIG.hud.position.z);
+    mesh.rotation.y = CONFIG.hud.rotation.y;
+    playerRig.add(mesh);
+
+    const btnCanvas  = document.createElement('canvas');
+    btnCanvas.width  = 256;
+    btnCanvas.height = 80;
+    const btnCtx = btnCanvas.getContext('2d');
+    const btnTex = new THREE.CanvasTexture(btnCanvas);
+    const btnMesh = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.55, 0.17),
+      new THREE.MeshBasicMaterial({ map: btnTex, transparent: true, side: THREE.DoubleSide })
+    );
+    btnMesh.position.set(
+      CONFIG.hud.position.x,
+      CONFIG.hud.position.y - CONFIG.hud.size.h / 2 - 0.14,
+      CONFIG.hud.position.z
+    );
+    btnMesh.rotation.y = CONFIG.hud.rotation.y;
+    btnMesh.name = 'resetBtn';
+    playerRig.add(btnMesh);
+
+    hud = { mesh, canvas, ctx, texture, btnMesh, btnCanvas, btnCtx, btnTex };
+    drawResetButton('idle');
+  }
+
+  function updateHUD() {
+    if (!hud) return;
+    const { canvas, ctx, texture } = hud;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = 'rgba(0,0,0,0.82)';
+    roundRect(ctx, 0, 0, canvas.width, canvas.height, 18);
+    ctx.fill();
+
+    ctx.fillStyle = '#0d2e0d';
+    roundRect(ctx, 0, 0, canvas.width, 64, { tl: 18, tr: 18, bl: 0, br: 0 });
+    ctx.fill();
+    ctx.fillStyle = '#7fff7f';
+    ctx.font      = 'bold 34px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('⚾  Batting Stats', canvas.width / 2, 44);
+
+    ctx.strokeStyle = '#2a2a2a';
+    ctx.lineWidth   = 2;
+    ctx.beginPath();
+    ctx.moveTo(20, 70);
+    ctx.lineTo(canvas.width - 20, 70);
+    ctx.stroke();
+
+    const hitRate = stats.pitchCount > 0
+      ? ((stats.hitCount / stats.pitchCount) * 100).toFixed(1)
+      : '0.0';
+
+    const rows = [
+      ['Pitches',        stats.pitchCount],
+      ['Hits',           stats.hitCount],
+      ['Hit Rate',       `${hitRate}%`],
+      ['Last Bat Speed', `${stats.lastHitSpeed.toFixed(1)} m/s`],
+    ];
+
+    rows.forEach(([label, value], i) => {
+      const y = 114 + i * 50;
+      if (i % 2 === 0) {
+        ctx.fillStyle = 'rgba(255,255,255,0.05)';
+        ctx.fillRect(10, y - 30, canvas.width - 20, 44);
+      }
+      ctx.fillStyle = '#aaaaaa';
+      ctx.font      = '22px sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(label, 28, y);
+      ctx.fillStyle = '#ffffff';
+      ctx.font      = 'bold 22px sans-serif';
+      ctx.textAlign = 'right';
+      ctx.fillText(value, canvas.width - 28, y);
+    });
+
+    ctx.fillStyle = '#555';
+    ctx.font      = '17px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('R key  or  aim + trigger to reset', canvas.width / 2, 305);
+
+    texture.needsUpdate = true;
+  }
+
+
+  // ── Reset Stats ──────────────────────────────────────────────
+  function resetStats() {
+    stats.pitchCount   = 0;
+    stats.hitCount     = 0;
+    stats.lastHitSpeed = 0;
+    updateHUD();
+    drawResetButton('pressed');
+    setTimeout(() => drawResetButton('idle'), 600);
+    console.log('🔄 Stats reset');
+  }
+
+  window.addEventListener('keydown', e => { if (e.key.toLowerCase() === 'r') resetStats(); });
+
+  const resetRaycaster = new THREE.Raycaster();
+  function checkResetButtonPress(ctrl) {
+    if (!hud?.btnMesh) return;
+    const origin    = new THREE.Vector3();
+    const direction = new THREE.Vector3();
+    ctrl.getWorldPosition(origin);
+    ctrl.getWorldDirection(direction);
+    resetRaycaster.set(origin, direction);
+    if (resetRaycaster.intersectObject(hud.btnMesh).length > 0) resetStats();
+  }
+  ctrl0.addEventListener('selectstart', () => checkResetButtonPress(ctrl0));
+  ctrl1.addEventListener('selectstart', () => checkResetButtonPress(ctrl1));
+
+
+  // ── Main Loop ────────────────────────────────────────────────
+  const clock = new THREE.Clock();
+  const tmpV  = new THREE.Vector3();
+  const tmpQ  = new THREE.Quaternion();
+
+  const batBodyProbe = new THREE.Mesh(
+    new THREE.SphereGeometry(0.05, 12, 12),
+    new THREE.MeshBasicMaterial({ color: 0xffff00, wireframe: true })
+  );
+  scene.add(batBodyProbe);
+  debugObjects.push(batBodyProbe);
+
+  function syncBatBody() {
+    if (!batMesh || !batBody) return;
+    const hitboxGroup = batMesh.getObjectByName('batHitboxViz') || batMesh;
+    hitboxGroup.getWorldPosition(tmpV);
+    hitboxGroup.getWorldQuaternion(tmpQ);
+
+    const nowSec = performance.now() / 1000;
+    batPosSamples.push({ pos: tmpV.clone(), t: nowSec });
+    if (batPosSamples.length > BAT_VEL_SAMPLES) batPosSamples.shift();
+
+    if (batPosSamples.length >= 2) {
+      const oldest  = batPosSamples[0];
+      const newest  = batPosSamples[batPosSamples.length - 1];
+      const elapsed = newest.t - oldest.t;
+      if (elapsed > 1e-4) {
+        batVelocity.copy(newest.pos).sub(oldest.pos).divideScalar(elapsed);
+      }
+    }
+
+    batPrevPos.copy(tmpV);
+    batBody.position.copy(tmpV);
+    batBody.quaternion.copy(tmpQ);
+    batBody.velocity.set(batVelocity.x, batVelocity.y, batVelocity.z);
+    batBodyProbe.position.copy(tmpV);
+  }
+
+  function syncBalls() {
+    const now = performance.now();
+    for (const b of activeBalls) {
+      b.mesh.position.copy(b.body.position);
+      b.mesh.quaternion.copy(b.body.quaternion);
+    }
+    for (let i = activeBalls.length - 1; i >= 0; i--) {
+      const b = activeBalls[i];
+      const expired = b.body.position.y < CONFIG.player.position.y - 5
+                   || now - b.spawnTime > 20000;
+      if (!expired) continue;
+      resolvedBalls.delete(b.body);
+      scene.remove(b.mesh);
+      world.removeBody(b.body);
+      activeBalls.splice(i, 1);
+    }
+  }
+  
+  
+
+  window.addEventListener('resize', () => {
+    camera.aspect = innerWidth / innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+
+
+  // ── Boot ─────────────────────────────────────────────────────
+  loadAll().then(() => {
+    spawnBatInWorld();
+    spawnPitcher();
+    makeHUD();
+    addMarkers();
+    setDebugVisible(CONFIG.debug.showBatCollider || CONFIG.debug.showMarkers);
+    renderer.setAnimationLoop(() => {
+    const dt = clock.getDelta();
+    syncBatBody();
+    world.step(1 / 120, dt, 10);
+    syncBalls();
+    updateHUD();
+    if (coordsEl) {
+      const p = camera.position;
+      coordsEl.textContent = `cam: (${p.x.toFixed(1)}, ${p.y.toFixed(1)}, ${p.z.toFixed(1)})`;
+    }
+    renderer.render(scene, camera);
+  });
+    console.log('✅ Ready — G grab/drop · P pitch · D debug · R reset stats');
+  }).catch(err => {
+    console.error(err);
+    document.body.insertAdjacentHTML('beforeend', `
+      <div style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+           background:#b00;color:white;padding:20px;font-family:sans-serif;
+           border-radius:8px;max-width:400px;text-align:center;">
+        <b>Failed to load assets.</b><br/><br/>
+        Make sure <code>stadium.glb</code>, <code>baseballBat.glb</code>,
+        <code>baseball.glb</code>, and <code>pitcher.glb</code>
+        are inside an <code>assets/</code> folder next to <code>index.html</code>.<br/><br/>
+        <small>${err.message}</small>
+      </div>`);
+  });
+
+  </script>
+</body>
+</html>
